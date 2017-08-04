@@ -419,6 +419,8 @@ pub enum IOType {
     ///
     /// **Available** in OS X v10.2 and later.
     GenericOutput = 1734700658,
+
+    RemoteIO = 1919512419,
     /// An audio unit that can provides input/output connection to an a specified audio device.
     ///
     /// Bus 0 provides output to the audio device and bus 1 accepts input from the audio device.
