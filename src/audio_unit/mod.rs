@@ -50,16 +50,17 @@ pub mod types;
 ///
 /// More info [here](https://developer.apple.com/library/ios/documentation/AudioUnit/Reference/AudioUnitPropertiesReference/index.html#//apple_ref/doc/constant_group/Audio_Unit_Scopes)
 /// and [here](https://developer.apple.com/library/mac/documentation/MusicAudio/Conceptual/AudioUnitProgrammingGuide/TheAudioUnit/TheAudioUnit.html).
-#[derive(Copy, Clone, Debug)]
+#[derive(Copy, Clone, Debug, PartialEq)]
 pub enum Scope {
-    Output = 0,
+    Global  = 0,
     Input  = 1,
+    Output = 2,
 }
 
 /// Represents the **Input** and **Output** **Element**s.
 ///
 /// These are used when specifying which **Element** we're setting the properties of.
-#[derive(Copy, Clone, Debug)]
+#[derive(Copy, Clone, Debug, PartialEq)]
 pub enum Element {
     Output = 0,
     Input  = 1,
@@ -71,7 +72,8 @@ pub enum Element {
 /// Find the original Audio Unit Programming Guide [here](https://developer.apple.com/library/mac/documentation/MusicAudio/Conceptual/AudioUnitProgrammingGuide/TheAudioUnit/TheAudioUnit.html).
 pub struct AudioUnit {
     instance: au::AudioUnit,
-    maybe_callback: Option<*mut render_callback::InputProcFnWrapper>
+    render_callback: Option<*mut render_callback::InputProcFnWrapper>,
+    input_callback: Option<*mut render_callback::InputProcFnWrapper>,
 }
 
 
@@ -149,12 +151,19 @@ impl AudioUnit {
             );
 
             // Initialise the audio unit!
-            try_os_status!(au::AudioUnitInitialize(instance));
             Ok(AudioUnit {
                 instance: instance,
-                maybe_callback: None
+                render_callback: None,
+                input_callback: None,
             })
         }
+    }
+
+    pub fn initialize(&mut self) -> Result<(), Error> {
+        unsafe {
+            try_os_status!(au::AudioUnitInitialize(self.instance));
+        }
+        Ok(())
     }
 
     /// Sets the value for some property of the **AudioUnit**.
@@ -274,6 +283,12 @@ impl AudioUnit {
         StreamFormat::from_asbd(asbd)
     }
 
+    pub fn set_input_stream_format(&mut self, stream_format: StreamFormat) -> Result<(), Error> {
+        let id = au::kAudioUnitProperty_StreamFormat;
+        let asbd = stream_format.to_asbd();
+        self.set_property(id, Scope::Output, Element::Input, Some(&asbd))?;
+        Ok(())
+    }
 }
 
 
@@ -293,6 +308,7 @@ impl Drop for AudioUnit {
             error::Error::from_os_status(au::AudioUnitUninitialize(self.instance)).ok();
 
             self.free_render_callback();
+            self.free_input_callback();
         }
     }
 }

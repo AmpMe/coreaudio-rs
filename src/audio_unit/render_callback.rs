@@ -1,3 +1,4 @@
+use std;
 use bindings::audio_unit as au;
 use error::{self, Error};
 use libc;
@@ -13,13 +14,14 @@ pub use self::data::Data;
 /// This allows the user to provide a custom, more rust-esque callback function type that takes
 /// greater advantage of rust's type safety.
 pub type InputProcFn = FnMut(*mut au::AudioUnitRenderActionFlags,
-                             *const au::AudioTimeStamp,
-                             au::UInt32,
-                             au::UInt32,
-                             *mut au::AudioBufferList) -> au::OSStatus;
+    *const au::AudioTimeStamp,
+    au::UInt32,
+    au::UInt32,
+    *mut au::AudioBufferList) -> au::OSStatus;
 
 /// This type allows us to safely wrap a boxed `RenderCallback` to use within the input proc.
 pub struct InputProcFnWrapper {
+    audiounit: au::AudioUnit,
     callback: Box<InputProcFn>,
 }
 
@@ -172,7 +174,6 @@ pub mod data {
     }
 
     impl<S> NonInterleaved<S> {
-
         /// An iterator yielding a reference to each channel in the array.
         pub fn channels(&self) -> Channels<S> {
             Channels {
@@ -190,7 +191,6 @@ pub mod data {
                 sample_format: PhantomData,
             }
         }
-
     }
 
     // Implementation for a non-interleaved linear PCM audio format.
@@ -201,7 +201,7 @@ pub mod data {
             // TODO: This is never set, even though the default ABSD on OS X is non-interleaved!
             // Should really investigate why this is.
             // format.flags.contains(linear_pcm_flags::IS_NON_INTERLEAVED) &&
-                S::sample_format().does_match_flags(format.flags)
+            S::sample_format().does_match_flags(format.flags)
         }
 
         #[allow(non_snake_case)]
@@ -218,13 +218,12 @@ pub mod data {
             }
         }
     }
-
 }
 
 pub mod action_flags {
     use bindings::audio_unit as au;
 
-    bitflags!{
+    bitflags! {
         pub struct ActionFlags: u32 {
             /// Called on a render notification Proc, which is called either before or after the
             /// render operation of the audio unit. If this flag is set, the proc is being called
@@ -294,7 +293,6 @@ pub mod action_flags {
     }
 
     impl Handle {
-
         /// Retrieve the current state of the `ActionFlags`.
         pub fn get(&self) -> ActionFlags {
             ActionFlags::from_bits_truncate(unsafe { *self.ptr })
@@ -354,7 +352,6 @@ pub mod action_flags {
         pub fn from_ptr(ptr: *mut au::AudioUnitRenderActionFlags) -> Self {
             Handle { ptr: ptr }
         }
-
     }
 
     unsafe impl Send for Handle {}
@@ -378,9 +375,8 @@ pub mod action_flags {
 
 
 impl AudioUnit {
-
     /// Pass a render callback (aka "Input Procedure") to the **AudioUnit**.
-    pub fn set_render_callback<F, D>(&mut self, mut f: F) -> Result<(), Error>
+    pub fn set_render_callback<F, D>(&mut self, scope: Scope, mut f: F) -> Result<(), Error>
         where F: FnMut(Args<D>) -> Result<(), ()> + 'static,
               D: Data,
     {
@@ -403,26 +399,27 @@ impl AudioUnit {
                                   in_bus_number: au::UInt32,
                                   in_number_frames: au::UInt32,
                                   io_data: *mut au::AudioBufferList| -> au::OSStatus
-        {
-            let args = unsafe {
-                let data = D::from_input_proc_args(in_number_frames, io_data);
-                let flags = action_flags::Handle::from_ptr(io_action_flags);
-                Args {
-                    data: data,
-                    time_stamp: *in_time_stamp,
-                    flags: flags,
-                    bus_number: in_bus_number as u32,
-                    num_frames: in_number_frames as usize,
+            {
+                let args = unsafe {
+                    let data = D::from_input_proc_args(in_number_frames, io_data);
+                    let flags = action_flags::Handle::from_ptr(io_action_flags);
+                    Args {
+                        data: data,
+                        time_stamp: *in_time_stamp,
+                        flags: flags,
+                        bus_number: in_bus_number as u32,
+                        num_frames: in_number_frames as usize,
+                    }
+                };
+
+                match f(args) {
+                    Ok(()) => 0 as au::OSStatus,
+                    Err(()) => error::Error::Unspecified.to_os_status(),
                 }
             };
 
-            match f(args) {
-                Ok(()) => 0 as au::OSStatus,
-                Err(()) => error::Error::Unspecified.to_os_status(),
-            }
-        };
-
         let input_proc_fn_wrapper = Box::new(InputProcFnWrapper {
+            audiounit: self.instance,
             callback: Box::new(input_proc_fn),
         });
 
@@ -432,24 +429,40 @@ impl AudioUnit {
         // within our AudioUnit's Drop implementation (otherwise it would leak).
         let input_proc_fn_wrapper_ptr = Box::into_raw(input_proc_fn_wrapper) as *mut libc::c_void;
 
-        let render_callback = au::AURenderCallbackStruct {
-            inputProc: Some(input_proc),
-            inputProcRefCon: input_proc_fn_wrapper_ptr,
-        };
+        if scope == Scope::Output {
+            let render_callback = au::AURenderCallbackStruct {
+                inputProc: Some(output_proc),
+                inputProcRefCon: input_proc_fn_wrapper_ptr,
+            };
 
-        try!(self.set_property(au::kAudioUnitProperty_SetRenderCallback,
-                               Scope::Input,
-                               Element::Output,
-                               Some(&render_callback)));
+            try!(self.set_property(au::kAudioUnitProperty_SetRenderCallback,
+                                   Scope::Input,
+                                   Element::Output,
+                                   Some(&render_callback)));
 
-        self.free_render_callback();
-        self.maybe_callback = Some(input_proc_fn_wrapper_ptr as *mut InputProcFnWrapper);
+            self.free_render_callback();
+            self.render_callback = Some(input_proc_fn_wrapper_ptr as *mut InputProcFnWrapper);
+        } else {
+            let render_callback = au::AURenderCallbackStruct {
+                inputProc: Some(input_proc),
+                inputProcRefCon: input_proc_fn_wrapper_ptr,
+            };
+
+            try!(self.set_property(au::kAudioOutputUnitProperty_SetInputCallback,
+                                   Scope::Global,
+                                   Element::Input,
+                                   Some(&render_callback)));
+
+            self.free_input_callback();
+            self.input_callback = Some(input_proc_fn_wrapper_ptr as *mut InputProcFnWrapper);
+        }
+
         Ok(())
     }
 
     /// Retrieves ownership over the render callback and drops it.
     pub fn free_render_callback(&mut self) {
-        if let Some(callback) = self.maybe_callback.take() {
+        if let Some(callback) = self.render_callback.take() {
             // Here, we transfer ownership of the callback back to the current scope so that it
             // is dropped and cleaned up. Without this line, we would leak the Boxed callback.
             let _: Box<InputProcFnWrapper> = unsafe {
@@ -458,8 +471,16 @@ impl AudioUnit {
         }
     }
 
+    pub fn free_input_callback(&mut self) {
+        if let Some(callback) = self.input_callback.take() {
+            // Here, we transfer ownership of the callback back to the current scope so that it
+            // is dropped and cleaned up. Without this line, we would leak the Boxed callback.
+            let _: Box<InputProcFnWrapper> = unsafe {
+                Box::from_raw(callback as *mut InputProcFnWrapper)
+            };
+        }
+    }
 }
-
 
 /// Callback procedure that will be called each time our audio_unit requests audio.
 extern "C" fn input_proc(in_ref_con: *mut libc::c_void,
@@ -468,6 +489,42 @@ extern "C" fn input_proc(in_ref_con: *mut libc::c_void,
                          in_bus_number: au::UInt32,
                          in_number_frames: au::UInt32,
                          io_data: *mut au::AudioBufferList) -> au::OSStatus
+{
+    let wrapper = in_ref_con as *mut InputProcFnWrapper;
+    unsafe {
+        // TODO: That should not be hard-coded
+        let data = libc::malloc((in_number_frames * 2 * 4) as usize);
+        let mut input_data = au::AudioBufferList {
+            mNumberBuffers: 1,
+            mBuffers: [au::AudioBuffer {
+                mNumberChannels: 1,
+                mDataByteSize: in_number_frames * 2 * 4,
+                mData: data,
+            }; 128],
+        };
+
+        au::AudioUnitRender(
+            (*wrapper).audiounit, io_action_flags,
+            in_time_stamp, in_bus_number, in_number_frames, &mut input_data
+        );
+
+        let ret = (*(*wrapper).callback)(io_action_flags,
+                               in_time_stamp,
+                               in_bus_number,
+                               in_number_frames,
+                               &mut input_data);
+        libc::free(data);
+        ret
+    }
+}
+
+/// Callback procedure that will be called each time our audio_unit requests audio.
+extern "C" fn output_proc(in_ref_con: *mut libc::c_void,
+                          io_action_flags: *mut au::AudioUnitRenderActionFlags,
+                          in_time_stamp: *const au::AudioTimeStamp,
+                          in_bus_number: au::UInt32,
+                          in_number_frames: au::UInt32,
+                          io_data: *mut au::AudioBufferList) -> au::OSStatus
 {
     let wrapper = in_ref_con as *mut InputProcFnWrapper;
     unsafe {
