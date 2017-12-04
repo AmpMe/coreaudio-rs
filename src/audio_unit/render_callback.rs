@@ -490,6 +490,7 @@ extern "C" fn input_proc(in_ref_con: *mut libc::c_void,
                          in_number_frames: au::UInt32,
                          io_data: *mut au::AudioBufferList) -> au::OSStatus
 {
+    println!("YEP");
     let wrapper = in_ref_con as *mut InputProcFnWrapper;
     unsafe {
         // TODO: That should not be hard-coded

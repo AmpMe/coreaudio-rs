@@ -224,6 +224,21 @@ impl AudioUnit {
         }
     }
 
+    pub fn get_object_property<T>(&self, id: u32, scope: Scope, elem: Element) -> Result<T, Error> {
+        let scope = scope as libc::c_uint;
+        let elem = elem as libc::c_uint;
+        let mut size = ::std::mem::size_of::<T>() as u32;
+        unsafe {
+            let mut data: T = ::std::mem::uninitialized();
+            let data_ptr = &mut data as *mut _ as *mut libc::c_void;
+            let size_ptr = &mut size as *mut _;
+            try_os_status!(
+                au::AudioUnitGetProperty(self.instance, id, scope, elem, data_ptr, size_ptr)
+            );
+            Ok(data)
+        }
+    }
+
     /// Starts an I/O **AudioUnit**, which in turn starts the audio unit processing graph that it is
     /// connected to.
     ///
